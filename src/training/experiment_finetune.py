@@ -4,18 +4,30 @@ from transformers import (
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
 )
-from datasets import load_from_disk, concatenate_datasets
+from datasets import load_from_disk, concatenate_datasets, load_dataset
 import argparse
 import torch
 import os
 from transformers import EarlyStoppingCallback
 
 torch.multiprocessing.set_sharing_strategy("file_system")
-from src.whisper_utils import (  # noqa: E402
+from whisper_utils import (  # noqa: E402
     DataCollatorSpeechSeq2SeqWithPadding,
     compute_metrics,
     TimingCallback,
 )
+
+# home = "/media/justin/SSD Ubuntu Stora/datasets/huggingface"
+# print(os.environ["HF_HOME"])
+# print(os.environ["HF_HUB_CACHE"])
+# print(os.environ["HF_XET_CACHE"])
+# print(os.environ["HF_ASSETS_CACHE"])
+# print(os.environ["TRANSFORMERS_CACHE"])
+# os.environ["HF_HOME"] = home
+# os.environ["HF_HUB_CACHE"] = f"{home}/hub"
+# os.environ["HF_XET_CACHE"] = f"{home}/xet"
+# os.environ["HF_ASSETS_CACHE"] = f"{home}/assets"
+os.environ["TRANSFORMERS_CACHE"] = f"/media/justin/SSD Ubuntu Stora/fat_temp"
 
 if __name__ == "__main__":
     root = ""
@@ -32,16 +44,21 @@ if __name__ == "__main__":
     )
 
     if args.dialect == "all":
-        dialect_dataset = load_from_disk(os.path.join(root, "egyptian_train/"))
-        for d in ["gulf", "iraqi", "levantine", "maghrebi"]:
-            train_d = load_from_disk(os.path.join(root, f"{d}_train/"))
-            dialect_dataset = concatenate_datasets(
-                [train_d, dialect_dataset]
-            )
+        assert(False)
+        # dialect_dataset = load_from_disk(os.path.join(root, "egyptian_train/"))
+        # for d in ["gulf", "iraqi", "levantine", "maghrebi"]:
+        #     train_d = load_from_disk(os.path.join(root, f"{d}_train/"))
+        #     dialect_dataset = concatenate_datasets(
+        #         [train_d, dialect_dataset]
+        #     )
     else:
-        dialect_dataset = load_from_disk(os.path.join(root, f"{args.dialect}_train/"))
-    os.environ["TRANSFORMERS_CACHE"] = f"model_cache_{args.dialect}_finetune"
-    os.environ["HF_HOME"] = f"hf_cache_{args.dialect}_finetune"
+        dialect_dataset = load_dataset(f"otozz/{args.dialect}_train_set")["train"]
+        # if args.dialect == "egyptian":
+        #     dialect_dataset = load_from_disk("/media/justin/SSD Ubuntu Stora/datasets/egypt_train")["train"]
+        # else:
+        #     dialect_dataset = load_from_disk(os.path.join(root, f"{args.dialect}_train/"))
+    # os.environ["TRANSFORMERS_CACHE"] = f"model_cache_{args.dialect}_finetune"
+    # os.environ["HF_HOME"] = f"hf_cache_{args.dialect}_finetune"
 
     print(f"Training on {args.dialect} dialect, loaded from {dialect_dataset}")
     processor = WhisperProcessor.from_pretrained(
@@ -62,8 +79,8 @@ if __name__ == "__main__":
         per_device_eval_batch_size=8,
         predict_with_generate=True,
         generation_max_length=225,
-        save_steps=250,
-        eval_steps=250,
+        save_steps=1000,
+        eval_steps=1000,
         logging_steps=25,
         report_to=["tensorboard"],
         load_best_model_at_end=True,

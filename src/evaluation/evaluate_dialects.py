@@ -6,7 +6,7 @@ from transformers import (
 )
 from datasets import load_from_disk
 import argparse
-from src.whisper_utils import DataCollatorSpeechSeq2SeqWithPadding, compute_metrics
+from whisper_utils import DataCollatorSpeechSeq2SeqWithPadding, compute_metrics
 import json
 import os
 from transformers import EarlyStoppingCallback
@@ -57,7 +57,10 @@ if __name__ == "__main__":
     all_results = {}
     model_name = str(args.checkpoint).split("/")[-1]
     for d in ["egyptian", "gulf", "iraqi", "levantine", "maghrebi"]:
-        test_set = load_from_disk(os.path.join(root, f"{d}_test/"))
+        if d != "maghrebi":
+            continue
+        test_set = load_from_disk("/media/justin/SSD Ubuntu Stora/datasets/egypt_test")["train"]
+        # test_set = load_from_disk(os.path.join(root, f"{d}_test/"))
         trainer = Seq2SeqTrainer(
             args=training_args,
             model=model,
@@ -70,6 +73,8 @@ if __name__ == "__main__":
         all_results[d] = results.copy()
         with open(f"results_{model_name}.json", "w") as f:
             json.dump(all_results, f)
+
+    assert(False) 
     test_set = load_from_disk(os.path.join(root, "test"))
     trainer = Seq2SeqTrainer(
         args=training_args,
