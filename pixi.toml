@@ -214,12 +214,12 @@ sympy = "==1.14.0"
 tensorboard = "==2.20.0"
 tensorboard-data-server = "==0.7.2"
 threadpoolctl = "==3.6.0"
-tokenizers = "==0.15.2"
+tokenizers = "==0.21"
 torch = {version = "==2.4.1", index = "https://download.pytorch.org/whl/cu121"}
 torchaudio = {version = "==2.4.1", index = "https://download.pytorch.org/whl/cu121"} 
 torchvision = {version = "==0.19.1", index = "https://download.pytorch.org/whl/cu121"}
 tqdm = "==4.67.3"
-transformers = "==4.38.2"
+transformers = "==4.47.1"
 triton = "==3.0.0"
 typer-slim = "==0.21.2"
 tzdata = "==2025.3"

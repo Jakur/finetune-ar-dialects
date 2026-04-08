@@ -15,6 +15,8 @@ from whisper_utils import (  # noqa: E402
     DataCollatorSpeechSeq2SeqWithPadding,
     compute_metrics,
     TimingCallback,
+    WhisperEncoderForCTC,
+    ExtendedWhisperConfig
 )
 
 # home = "/media/justin/SSD Ubuntu Stora/datasets/huggingface"
@@ -67,37 +69,52 @@ if __name__ == "__main__":
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
 
+    # bs = 8
+    bs = 4
+
     training_args = Seq2SeqTrainingArguments(
-        output_dir=f"whisper-small-finetune_{args.dialect}",
-        per_device_train_batch_size=8,
+        output_dir=f"whisper-small-feature_{args.dialect}",
+        per_device_train_batch_size=bs,
         gradient_accumulation_steps=1,
-        learning_rate=1e-5,
-        warmup_steps=500,
-        max_steps=5000,
+        learning_rate=1e-3,
+        warmup_steps=1000,
+        max_steps=20000,
         gradient_checkpointing=True,
+        dataloader_num_workers=4,
         evaluation_strategy="steps",
-        per_device_eval_batch_size=8,
-        predict_with_generate=True,
+        per_device_eval_batch_size=bs,
+        predict_with_generate=False,
         generation_max_length=225,
-        save_steps=1000,
-        eval_steps=1000,
+        save_steps=2500,
+        eval_steps=2500,
         logging_steps=25,
         report_to=["tensorboard"],
         load_best_model_at_end=True,
         metric_for_best_model="wer",
         greater_is_better=False,
         save_total_limit=2,
+        fp16=True,
+        fp16_full_eval=True,
+        torch_empty_cache_steps=50,
+        batch_eval_metrics=False
     )
+    def preprocess_logits_for_metrics(logits, labels):
+        pred_ids = torch.argmax(logits, dim=-1)
+        return pred_ids, labels
+    
     for seed in [168]:
-        print(f"Training with seed {seed}")        
-        model = WhisperForConditionalGeneration.from_pretrained(
-            "otozz/whisper-small-ar_tsize_1.0"
-        )
+        print(f"Training with seed {seed}")       
+        model = WhisperEncoderForCTC.from_pretrained("otozz/whisper-small-ar_tsize_1.0")
+        # model = WhisperForConditionalGeneration.from_pretrained(
+        #     "otozz/whisper-small-ar_tsize_1.0"
+        # )
+        print(f"Pad token id: {model.config.pad_token_id}")
+        model.freeze_base_model()
         model.config.forced_decoder_ids = None
         model.config.suppress_tokens = []
-        model.generation_config.language = "ar"
-        model.config.max_length = 512
-        train_test = dialect_dataset.train_test_split(test_size=0.2, seed=seed)
+        # model.generation_config.language = "ar"
+        model.config.max_length = 256 # 512
+        train_test = dialect_dataset.train_test_split(test_size=0.05, seed=seed)
         trainer = Seq2SeqTrainer(
             args=training_args,
             model=model,
@@ -106,6 +123,7 @@ if __name__ == "__main__":
             data_collator=data_collator,
             compute_metrics=compute_metrics,
             tokenizer=processor.feature_extractor,
+            preprocess_logits_for_metrics=preprocess_logits_for_metrics,
             callbacks=[early_stopping_callback, TimingCallback(args.dialect, "finetune", seed)],
         )
         training_args.output_dir = f"whisper-small-finetune_{args.dialect}_seed{seed}"
@@ -116,5 +134,6 @@ if __name__ == "__main__":
                 break
             except Exception as e:
                 print(f"Attempt {i + 1} failed with error: {e}")
-                continue
+            
+            break
         print("----------------------------")
