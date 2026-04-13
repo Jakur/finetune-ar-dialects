@@ -1,6 +1,7 @@
 from transformers import (
     WhisperProcessor,
     WhisperForConditionalGeneration,
+    WhisperFeatureExtractor,
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
 )
@@ -16,7 +17,8 @@ from whisper_utils import (  # noqa: E402
     compute_metrics,
     TimingCallback,
     WhisperEncoderForCTC,
-    ExtendedWhisperConfig
+    ExtendedWhisperConfig,
+    custom_tokenizer,
 )
 
 # home = "/media/justin/SSD Ubuntu Stora/datasets/huggingface"
@@ -42,7 +44,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     early_stopping_callback = EarlyStoppingCallback(
-        early_stopping_patience=3, early_stopping_threshold=0.001
+        early_stopping_patience=6, early_stopping_threshold=0.001
     )
 
     if args.dialect == "all":
@@ -66,6 +68,7 @@ if __name__ == "__main__":
     processor = WhisperProcessor.from_pretrained(
         "openai/whisper-small", language="Arabic", task="transcribe"
     )
+    # processor = WhisperProcessor(WhisperFeatureExtractor.from_pretrained("openai/whisper-small"), tokenizer=custom_tokenizer)
 
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
 
@@ -76,18 +79,18 @@ if __name__ == "__main__":
         output_dir=f"whisper-small-feature_{args.dialect}",
         per_device_train_batch_size=bs,
         gradient_accumulation_steps=1,
-        learning_rate=1e-3,
-        warmup_steps=1000,
-        max_steps=20000,
+        learning_rate=1e-2,
+        warmup_steps=2500,
+        max_steps=15000,
         gradient_checkpointing=True,
         dataloader_num_workers=4,
         evaluation_strategy="steps",
         per_device_eval_batch_size=bs,
         predict_with_generate=False,
         generation_max_length=225,
-        save_steps=2500,
-        eval_steps=2500,
-        logging_steps=25,
+        save_steps=5000,
+        eval_steps=5000,
+        logging_steps=100,
         report_to=["tensorboard"],
         load_best_model_at_end=True,
         metric_for_best_model="wer",
@@ -95,7 +98,6 @@ if __name__ == "__main__":
         save_total_limit=2,
         fp16=True,
         fp16_full_eval=True,
-        torch_empty_cache_steps=50,
         batch_eval_metrics=False
     )
     def preprocess_logits_for_metrics(logits, labels):

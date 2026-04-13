@@ -2,11 +2,13 @@ import evaluate
 
 import torch
 import time
-from transformers import WhisperTokenizer, TrainerCallback, WhisperPreTrainedModel, WhisperConfig
+from transformers import WhisperTokenizer, TrainerCallback, WhisperPreTrainedModel, WhisperConfig, AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutput
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 import torch.nn as nn 
 import dill as pickle 
+import safetensors 
+from tokenizers import Tokenizer
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 from dataclasses import dataclass  # noqa: E402
@@ -15,6 +17,17 @@ from typing import Any, Dict, List, Optional, Tuple, Union  # noqa: E402
 tokenizer = WhisperTokenizer.from_pretrained(
     "openai/whisper-small", language="Arabic", task="transcribe"
 )
+custom_tokenizer = Tokenizer.from_file("exp_tokenizer")
+custom_tokenizer.enable_padding()
+# custom_tokenizer = WhisperTokenizer(vocab_file='vocab.json',
+#                              merges_file="merges.txt",
+#                              unk_token='<UNK>',
+#                              bos_token= '<END>',
+#                              pad_token= '<PAD>',
+#                              eos_token= '<END>',
+#                              add_prefix_space=True,
+#                              model_max_length = 512,
+#                             language='Arabic', task='transcribe')
 wer_metric = evaluate.load("wer")
 cer_metric = evaluate.load("cer")
 with open('token_to_idx.bin', 'rb') as f:
@@ -50,17 +63,32 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
         return batch
 
-
 def compute_metrics(pred):
+    from safetensors.torch import save_file 
     print("Computing Metrics")
     pred_ids = pred.predictions[0]
     label_ids = pred.label_ids
+    # print(label_ids[0])
+    # print(pred_ids[0])
 
     label_ids[label_ids == -100] = tokenizer.pad_token_id
     # print(pred_ids.shape)
     # print(label_ids.shape)
-    pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+    # pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+    # label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
     label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
+    # print(label_str)
+    # save_file({"pred_ids": torch.tensor(pred_ids)}, "tensor.data")
+    # pred_str = label_str
+    # pred_str = custom_tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+    pred_str = custom_tokenizer.decode_batch(pred_ids, skip_special_tokens=True)
+    print("Prediction: " + pred_str[0])
+    print("Actual: " + label_str[0])
+    # try:
+    #     pred_str = custom_tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+    # except Exception as e:
+    #     print(e)
+    # print(pred_str)
     print("Batch Decode Success")
     wer = 100 * wer_metric.compute(predictions=pred_str, references=label_str)
     cer = 100 * cer_metric.compute(predictions=pred_str, references=label_str)
@@ -127,7 +155,7 @@ class ExtendedWhisperConfig(WhisperConfig):
         self,
         ctc_loss_reduction: str = "mean",
         final_dropout: float = 0.0,
-        ctc_zero_infinity: bool = False,
+        ctc_zero_infinity: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -158,7 +186,10 @@ class WhisperEncoderForCTC(WhisperPreTrainedModel):
             else config.hidden_size
         )
         # vocab_size = len(idx_to_token)
-        vocab_size = config.vocab_size
+        # vocab_size = custom_tokenizer.vocab_size
+        vocab_size = custom_tokenizer.get_vocab_size()
+        # vocab_size = config.vocab_size
+        print(f"Creating Linear: {output_hidden_size} --> {vocab_size}")
         self.lm_head = nn.Linear(output_hidden_size, vocab_size)
 
         # Initialize weights and apply final processing
@@ -231,23 +262,42 @@ class WhisperEncoderForCTC(WhisperPreTrainedModel):
             # print("Batch size " + str(labels.size()[0]))
             # assuming that padded tokens are filled with -100
             # when not being attended to
-            labels_mask = labels >= 0
-            target_lengths = labels_mask.sum(-1)
+            decoded = tokenizer.batch_decode(labels, skip_special_tokens=True)
+            # print(decoded)
+            # print(decoded)
+            labels_list = custom_tokenizer.encode_batch(decoded)
+            # print([x.ids for x in labels_list])
+            # print(labels_list)
+            # labels_list = custom_tokenizer.batch_encode_plus(decoded, padding=True)
+            # labels_data = [torch.tensor(x) for x in labels_list["input_ids"]]
+            labels_data = [torch.tensor(x.ids) for x in labels_list]
+            target_lengths = torch.tensor([x.count_nonzero() for x in labels_data])
+            # print(labels_data)
+            # labels = torch.stack(labels_data, dim=0)
+            # labels_mask = labels >= 1
+            # target_lengths = labels_mask.sum(-1)
             # print(target_lengths.size())
             # print(target_lengths)
+            labels = torch.cat(labels_data, dim=0)
+            labels_mask = labels >= 1
             flattened_targets = labels.masked_select(labels_mask)
-
+            # print(flattened_targets)
             # ctc_loss doesn't support fp16
             log_probs = nn.functional.log_softmax(
                 logits, dim=-1, dtype=torch.float32
             ).transpose(0, 1)
+            # print(log_probs.size())
+            # print(flattened_targets.size())
+            # print(input_lengths)
+            # print(target_lengths)
+            # assert(False)
             with torch.backends.cudnn.flags(enabled=False):
                 loss = nn.functional.ctc_loss(
                     log_probs,
                     flattened_targets,
                     input_lengths,
                     target_lengths,
-                    blank=self.config.pad_token_id,
+                    blank=0,
                     reduction=self.config.ctc_loss_reduction,
                     zero_infinity=self.config.ctc_zero_infinity,
                 )
