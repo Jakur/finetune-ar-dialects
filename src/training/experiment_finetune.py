@@ -79,7 +79,7 @@ if __name__ == "__main__":
         output_dir=f"whisper-small-feature_{args.dialect}",
         per_device_train_batch_size=bs,
         gradient_accumulation_steps=1,
-        learning_rate=1e-2,
+        learning_rate=2e-4,
         warmup_steps=2500,
         max_steps=15000,
         gradient_checkpointing=True,

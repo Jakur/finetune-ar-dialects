@@ -1,6 +1,7 @@
 import evaluate
 
 import torch
+import torch.nn.functional as F
 import time
 from transformers import WhisperTokenizer, TrainerCallback, WhisperPreTrainedModel, WhisperConfig, AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutput
@@ -190,7 +191,10 @@ class WhisperEncoderForCTC(WhisperPreTrainedModel):
         vocab_size = custom_tokenizer.get_vocab_size()
         # vocab_size = config.vocab_size
         print(f"Creating Linear: {output_hidden_size} --> {vocab_size}")
-        self.lm_head = nn.Linear(output_hidden_size, vocab_size)
+        self.lm_head = nn.Linear(vocab_size, vocab_size)
+        # self.rnn = nn.GRU(output_hidden_size, vocab_size, batch_first=True)
+        self.conv = nn.Conv1d(output_hidden_size, 128, kernel_size=7, padding='same')
+        self.conv2 = nn.Conv1d(128, vocab_size, kernel_size=5, padding='same')
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -234,8 +238,25 @@ class WhisperEncoderForCTC(WhisperPreTrainedModel):
 
         hidden_states = outputs[0]
         hidden_states = self.dropout(hidden_states)
+        hidden_states = torch.transpose(hidden_states, 1, 2)
+        data = F.relu(self.conv(hidden_states))
+        data = F.relu(self.conv2(data))
+        data = torch.transpose(data, 1, 2)
+        logits = self.lm_head(data)
+        # print(data.size())
+        # assert(False)
 
-        logits = self.lm_head(hidden_states)
+        # print(hidden_states.size())
+        # data, _h_n = self.rnn(hidden_states)
+        # print(data[0, 0:4])
+        # assert(False)
+        # data = self.lm_head(hidden_states)
+        # data = F.sigmoid(data)
+        # print(data.size())
+        # data, _h_n = self.rnn(hidden_states)
+        # print(data.size())
+        # logits = data
+        # print(logits[0])
         l_size = logits.size()
         # print(f"Logits {l_size}")
 
