@@ -8,10 +8,12 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 import time
-from transformers import WhisperTokenizer, TrainerCallback, WhisperPreTrainedModel, WhisperConfig, AutoTokenizer
+from transformers import SeamlessM4TFeatureExtractor, WhisperTokenizer, TrainerCallback, WhisperPreTrainedModel, WhisperConfig, AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutput
 from transformers import Wav2Vec2Processor, Wav2Vec2ForCTC, DataCollatorForSeq2Seq
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
+from transformers import AutoProcessor, AutoModel
+from transformers import AutoFeatureExtractor, Wav2Vec2BertModel, Wav2Vec2BertProcessor, Wav2Vec2FeatureExtractor, Wav2Vec2BertForCTC
 import torch.nn as nn 
 import dill as pickle 
 import safetensors 
@@ -24,6 +26,9 @@ os.environ["HF_HUB_CACHE"] = f"{home}/hub"
 os.environ["HF_XET_CACHE"] = f"{home}/xet"
 os.environ["HF_ASSETS_CACHE"] = f"{home}/assets"
 torch.autograd.set_detect_anomaly(True)
+
+# WAVEFORM = "input_values"
+WAVEFORM = "input_features"
 
 
 # %%
@@ -136,12 +141,14 @@ class Wav2Vec2ForCTC2(Wav2Vec2ForCTC):
 
 # %%
 processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
-model = Wav2Vec2ForCTC2.from_pretrained("facebook/wav2vec2-base-960h", ctc_loss_reduction="mean", mask_feature_length=5)
+# model = Wav2Vec2ForCTC2.from_pretrained("facebook/wav2vec2-base-960h", ctc_loss_reduction="mean", mask_feature_length=5)
+tokenizer = processor.tokenizer
 
-processor.tokenizer
-
-# %%
-processor.tokenizer.encode("alpha".upper())
+feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
+# feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
+processor = Wav2Vec2BertProcessor(feature_extractor, tokenizer)
+# model = Wav2Vec2BertForCTC.from_pretrained("facebook/w2v-bert-2.0", vocab_size=tokenizer.vocab_size, mask_feature_length=5)
+model = Wav2Vec2BertForCTC.from_pretrained("/home/justin/Code/Oakland/finetune-ar-dialects/new_torgo2/checkpoint-35000", mask_feature_length=5)
 
 # %%
 #     parser.add_argument("--loso_test_speaker", type=str, default="M01", help="Speaker ID for test set.")
@@ -160,7 +167,7 @@ def convert(ds, num_shards=32, iterable=True):
     if iterable:
         ds = ds.to_iterable_dataset(num_shards=num_shards)
     return ds.rename_column("text", "labels").map(
-        lambda x: {"input_values": processor(x["audio"].get_all_samples().data, sampling_rate=16000)["input_values"][0][0], 
+        lambda x: {WAVEFORM: x["audio"].get_all_samples().data.squeeze(), 
             "labels": processor.tokenizer.encode(x["labels"].upper()) }).remove_columns(
             ["audio", "speaker", "speech_status", "microphone", "length"])
     # return ds.to_iterable_dataset(num_shards=num_shards).rename_column("text", "labels").map(
@@ -201,7 +208,7 @@ class DataCollatorCTCWithPadding:
             7.5 (Volta).
     """
 
-    processor: Wav2Vec2Processor
+    processor: Wav2Vec2BertProcessor
     padding: Union[bool, str] = True
     max_length: Optional[int] = None
     max_length_labels: Optional[int] = None
@@ -211,16 +218,20 @@ class DataCollatorCTCWithPadding:
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         # split inputs and labels since they have to be of different lengths and need
         # different padding methods
-        input_features = [{"input_values": feature["input_values"]} for feature in features]
+        # print(features)
+        input_features = [feature[WAVEFORM] for feature in features]
         label_features = [{"input_ids": feature["labels"]} for feature in features]
-
-        batch = self.processor.pad(
-            input_features,
-            padding=self.padding,
-            max_length=self.max_length,
-            pad_to_multiple_of=self.pad_to_multiple_of,
-            return_tensors="pt",
-        )
+        
+        batch = self.processor(input_features, sampling_rate=16000)
+        batch["input_features"] = torch.from_numpy(batch["input_features"])
+        # print(batch["input_features"].shape)
+        # batch = self.processor.pad(
+        #     input_features,
+        #     padding=self.padding,
+        #     max_length=self.max_length,
+        #     pad_to_multiple_of=self.pad_to_multiple_of,
+        #     return_tensors="pt",
+        # )
         labels_batch = self.processor.pad(
             labels=label_features,
             padding=self.padding,
@@ -241,54 +252,6 @@ class DataCollatorCTCWithPadding:
 processor.pad(labels=[{"input_ids": [7, 7, 2]}, {"input_ids": [6, 6, 6, 6, 6]}])
 
 # %%
-# @dataclass
-# class DataCollatorSpeechSeq2SeqWithPadding:
-#     processor: Any
-
-#     def __call__(
-#         self, features: List[Dict[str, Union[List[int], torch.Tensor]]]
-#     ) -> Dict[str, torch.Tensor]:
-#         input_features = features
-#         # input_features = [
-#         #     {"input_features": feature["input_features"]} for feature in features
-#         # ]
-#         batch = self.processor.feature_extractor.pad(
-#             input_features, return_tensors="pt"
-#         )
-#         label_features = [{"input_ids": feature["labels"]} for feature in features]
-#         labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
-
-#         labels = labels_batch["input_ids"].masked_fill(
-#             labels_batch.attention_mask.ne(1), -100
-#         )
-
-#         if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all().cpu().item():
-#             labels = labels[:, 1:]
-
-#         batch["labels"] = labels
-
-#         return batch
-    
-# collator = DataCollatorSpeechSeq2SeqWithPadding(processor)
-
-# %%
-# from transformers import WhisperProcessor
-# dummy = WhisperProcessor.from_pretrained(
-#     "openai/whisper-small", language="Arabic", task="transcribe"
-# )
-
-# %%
-# processor(x["input_values"], text=x["labels"], sampling_rate=16000)
-
-# %%
-# for x in train:
-#     if "input_ids" not in x:
-#         assert(False)
-#     input = x["input_ids"]
-#     if len(input) < 10:
-#         assert(False)
-
-# %%
 # data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
 from transformers import (
     Wav2Vec2ProcessorWithLM,
@@ -296,14 +259,20 @@ from transformers import (
     Seq2SeqTrainer,
     TrainingArguments
 )
-from pyctcdecode import build_ctcdecoder
-old_processor = processor
-ctc_decode = build_ctcdecoder(list(processor.tokenizer.vocab), "text.arpa")
-processor = Wav2Vec2ProcessorWithLM(processor.feature_extractor, processor.tokenizer, ctc_decode)
+# from pyctcdecode import build_ctcdecoder
+# old_processor = processor
+# ctc_decode = build_ctcdecoder(list(processor.tokenizer.vocab), "text.arpa")
+# processor = Wav2Vec2ProcessorWithLM(processor.feature_extractor, processor.tokenizer, ctc_decode)
 # data_collator = DataCollatorForSeq2Seq(tokenizer=processor.tokenizer, model=model)
 data_collator = DataCollatorCTCWithPadding(processor=processor, padding=True)
 # data_collator = collator
 bs = 4
+# Freeze
+for x in model.parameters():
+    x.requires_grad_(False)
+model.lm_head.requires_grad_(True)
+
+print(model.lm_head.weight.size())
 # model.freeze_base_model()
 
 wer_metric = evaluate.load("wer")
@@ -311,22 +280,23 @@ cer_metric = evaluate.load("cer")
 tokenizer = processor.tokenizer
 
 def preprocess_logits_for_metrics(logits, labels):
-    logits = logits[0]
+    # logits = logits[0]
     # print(logits.size())
     # print(labels.size())
-    pred_ids = logits
-    # pred_ids = torch.argmax(logits, dim=-1)
+    # pred_ids = logits
+    pred_ids = torch.argmax(logits, dim=-1)
     return pred_ids, labels
 
 def compute_metrics(pred):
-    print("Computing Metrics")
-    pred_ids = pred.predictions[0]
+    pred_ids = pred.predictions[0] # logits (?) 
     label_ids = pred.label_ids
+    # for p in pred_ids:
+    #     print(p.shape)
 
     label_ids[label_ids == -100] = tokenizer.pad_token_id
 
     label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True, group_tokens=False)
-    pred_str = processor.batch_decode(pred_ids).text
+    pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
     # print("Prediction: " + pred_str[0])
     # print("Actual: " + label_str[0])
 
@@ -370,23 +340,24 @@ class TimingCallback(TrainerCallback):
 
 # %%
 training_args = Seq2SeqTrainingArguments(
-    output_dir=f"new_torgo",
+    output_dir=f"new_torgo3",
     per_device_train_batch_size=bs,
     gradient_accumulation_steps=1,
-    learning_rate=2e-4,
+    learning_rate=2e-3,
     warmup_steps=2500,
-    max_steps=15000,
+    num_train_epochs=50,
+    # max_steps=15000,
     gradient_checkpointing=True,
     dataloader_num_workers=4,
     per_device_eval_batch_size=bs,
     predict_with_generate=False,
     generation_max_length=512,
-    save_steps=500,
-    eval_steps=500,
+    save_steps=5000,
+    eval_steps=5000,
     logging_steps=100,
     report_to=["tensorboard"],
     load_best_model_at_end=True,
-    metric_for_best_model="wer",
+    metric_for_best_model="cer",
     greater_is_better=False,
     save_total_limit=2,
     fp16=False,
