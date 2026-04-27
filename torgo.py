@@ -259,6 +259,7 @@ from transformers import (
     Seq2SeqTrainer,
     TrainingArguments
 )
+import regex as re
 # from pyctcdecode import build_ctcdecoder
 # old_processor = processor
 # ctc_decode = build_ctcdecoder(list(processor.tokenizer.vocab), "text.arpa")
@@ -266,11 +267,28 @@ from transformers import (
 # data_collator = DataCollatorForSeq2Seq(tokenizer=processor.tokenizer, model=model)
 data_collator = DataCollatorCTCWithPadding(processor=processor, padding=True)
 # data_collator = collator
-bs = 4
-# Freeze
-for x in model.parameters():
+bs = 2
+# print(model)
+for n, x in model.named_parameters():
+    match = re.search(r"(?<=\.layers\.)\d+", n)
+    if "lm_head" in n:
+        x.requires_grad_(True)
+        continue
+    if match:
+        layer_num = int(match.group())
+        if layer_num > 20: 
+            x.requires_grad_(True)
+            continue
     x.requires_grad_(False)
-model.lm_head.requires_grad_(True)
+    # if "feature_projection" in n:
+    #     x.requires_grad_(False)
+    # else:
+    #     x.requires_grad_(True)
+
+# Freeze
+# for x in model.parameters():
+#     x.requires_grad_(False)
+# model.lm_head.requires_grad_(True)
 
 print(model.lm_head.weight.size())
 # model.freeze_base_model()
@@ -337,15 +355,28 @@ class TimingCallback(TrainerCallback):
                 f"Total training time: {total_time:.2f} seconds or {total_time / 3600:.2f} hours"
             )
 
+optimizer_grouped_parameters = [
+    {
+        "params": [p for n, p in model.named_parameters() if "lm_head" in n],
+        "lr": 1e-3, # Higher learning rate for the new head
+    },
+    {
+        "params": [p for n, p in model.named_parameters() if "lm_head" not in n],
+        "lr": 5e-5, # Lower learning rate for the pre-trained base
+    },
+]
+
+from torch.optim import AdamW
+optimizer = AdamW(optimizer_grouped_parameters)
 
 # %%
 training_args = Seq2SeqTrainingArguments(
     output_dir=f"new_torgo3",
     per_device_train_batch_size=bs,
     gradient_accumulation_steps=1,
-    learning_rate=2e-3,
+    learning_rate=1e-4,
     warmup_steps=2500,
-    num_train_epochs=50,
+    num_train_epochs=20,
     # max_steps=15000,
     gradient_checkpointing=True,
     dataloader_num_workers=4,
@@ -376,6 +407,7 @@ trainer = Seq2SeqTrainer(
     data_collator=data_collator,
     compute_metrics=compute_metrics,
     processing_class=processor,
+    optimizers=(optimizer, None),
     # tokenizer=processor.feature_extractor,
     preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     callbacks=[TimingCallback("Torgo", "finetune", 0)],
