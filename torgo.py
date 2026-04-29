@@ -2,7 +2,12 @@
 import torch
 from datasets import Audio, Dataset, DatasetDict, load_dataset, load_from_disk
 import os
+import numpy as np
+import regex as re
+import functools 
+from audiomentations import Compose, AddGaussianNoise, TimeStretch, PitchShift, Shift, RoomSimulator
 import evaluate
+from transformers.trainer_utils import seed_worker
 
 from dataclasses import dataclass
 import torch
@@ -52,92 +57,13 @@ dataset = dataset.map(lambda x: {"length": x["audio"].get_all_samples().duration
 dataset = dataset.filter(lambda x: x["length"] <= 30, num_proc=4) # Manually confirmed the 2 samples above this are garbage
 dataset
 
-class Wav2Vec2ForCTC2(Wav2Vec2ForCTC):
-    def forward(
-        self,
-        input_values: torch.Tensor | None,
-        attention_mask: torch.Tensor | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
-        labels: torch.Tensor | None = None,
-        **kwargs,
-    ) -> tuple | CausalLMOutput:
-        r"""
-        labels (`torch.LongTensor` of shape `(batch_size, target_length)`, *optional*):
-            Labels for connectionist temporal classification. Note that `target_length` has to be smaller or equal to
-            the sequence length of the output logits. Indices are selected in `[-100, 0, ..., config.vocab_size - 1]`.
-            All labels set to `-100` are ignored (masked), the loss is only computed for labels in `[0, ...,
-            config.vocab_size - 1]`.
-        """
-        self.eval()
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-        # print(attention_mask)
-        if labels is not None and labels.max() >= self.config.vocab_size:
-            raise ValueError(f"Label values must be <= vocab_size: {self.config.vocab_size}")
-        # input_values = input_values.clamp(-1e-5, 1e-5)
-        # print(input_values.min())
-        # print(input_values.max())
-        # print(torch.isnan(input_values).any())
-
-        # print(input_values[0][:])
-
-        outputs = self.wav2vec2(
-            input_values,
-            attention_mask=attention_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=True,
-            return_dict=return_dict,
-        )
-
-        # print(outputs)
-
-
-        # print(attention_mask.size())
-
-        hidden_states = outputs[0]
-        # print(torch.isnan(hidden_states).any())
-        hidden_states = self.dropout(hidden_states)
-
-        # print(hidden_states[0, 0, :])
-
-        logits = self.lm_head(hidden_states)
-
-        loss = None
-        if labels is not None:
-            # retrieve loss input_lengths from attention_mask
-            attention_mask = (
-                attention_mask if attention_mask is not None else torch.ones_like(input_values, dtype=torch.long)
-            )
-            input_lengths = self._get_feat_extract_output_lengths(attention_mask.sum(-1)).to(torch.long)
-
-            # assuming that padded tokens are filled with -100
-            # when not being attended to
-            labels_mask = labels >= 0
-            target_lengths = labels_mask.sum(-1)
-            flattened_targets = labels.masked_select(labels_mask)
-
-            # ctc_loss doesn't support fp16
-            # print(logits.transpose(0, 1)[0][0:10][:])
-            log_probs = nn.functional.log_softmax(logits, dim=-1, dtype=torch.float32).transpose(0, 1)
-            # print(log_probs.transpose(0, 1)[0][0:10][:])
-            # print(input_lengths)
-            # print(target_lengths)
-            with torch.backends.cudnn.flags(enabled=False):
-                loss = nn.functional.ctc_loss(
-                    log_probs,
-                    flattened_targets,
-                    input_lengths,
-                    target_lengths,
-                    blank=self.config.pad_token_id,
-                    reduction=self.config.ctc_loss_reduction,
-                    zero_infinity=self.config.ctc_zero_infinity,
-                )
-                # print(loss)
-
-        return CausalLMOutput(
-            loss=loss, logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions
-        )
+transform = Compose([
+    AddGaussianNoise(min_amplitude=0.001, max_amplitude=0.015, p=0.5),
+    # RoomSimulator(),
+    TimeStretch(min_rate=0.8, max_rate=1.25, p=0.5),
+    PitchShift(min_semitones=-4, max_semitones=4, p=0.5),
+    Shift(p=0.5),
+])
 
 # %%
 processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
@@ -148,7 +74,7 @@ feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained("facebook/w2v-be
 # feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained("facebook/w2v-bert-2.0")
 processor = Wav2Vec2BertProcessor(feature_extractor, tokenizer)
 # model = Wav2Vec2BertForCTC.from_pretrained("facebook/w2v-bert-2.0", vocab_size=tokenizer.vocab_size, mask_feature_length=5)
-model = Wav2Vec2BertForCTC.from_pretrained("/home/justin/Code/Oakland/finetune-ar-dialects/new_torgo2/checkpoint-35000", mask_feature_length=5)
+model = Wav2Vec2BertForCTC.from_pretrained("/home/justin/Code/Oakland/finetune-ar-dialects/new_torgo3/checkpoint-152220", mask_feature_length=5)
 
 # %%
 #     parser.add_argument("--loso_test_speaker", type=str, default="M01", help="Speaker ID for test set.")
@@ -214,16 +140,27 @@ class DataCollatorCTCWithPadding:
     max_length_labels: Optional[int] = None
     pad_to_multiple_of: Optional[int] = None
     pad_to_multiple_of_labels: Optional[int] = None
+    augment = False
+
+    def set_training(self, training):
+        self.augment = training
 
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         # split inputs and labels since they have to be of different lengths and need
         # different padding methods
         # print(features)
-        input_features = [feature[WAVEFORM] for feature in features]
+        input_features = [np.array(feature[WAVEFORM], dtype=np.float32) for feature in features]
+        if self.augment:
+            input_features = [transform(x, sample_rate=16000) for x in input_features]
         label_features = [{"input_ids": feature["labels"]} for feature in features]
-        
+        # for x in input_features:
+        #     x = np.array(x)
+        #     print(x.shape)
+        #     assert(x.max() <= 1.0 and x.min() >= -1.0)
+        # Convert to mel-spectogram and pad
         batch = self.processor(input_features, sampling_rate=16000)
         batch["input_features"] = torch.from_numpy(batch["input_features"])
+
         # print(batch["input_features"].shape)
         # batch = self.processor.pad(
         #     input_features,
@@ -314,7 +251,8 @@ def compute_metrics(pred):
     label_ids[label_ids == -100] = tokenizer.pad_token_id
 
     label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True, group_tokens=False)
-    pred_str = processor.batch_decode(pred_ids, skip_special_tokens=True)
+    pred_str = processor.batch_decode(pred_ids, skip_special_tokens=False, group_tokens=True)
+    pred_str = [re.sub("<unk>", "", p) for p in pred_str]
     # print("Prediction: " + pred_str[0])
     # print("Actual: " + label_str[0])
 
@@ -371,13 +309,13 @@ optimizer = AdamW(optimizer_grouped_parameters)
 
 # %%
 training_args = Seq2SeqTrainingArguments(
-    output_dir=f"new_torgo3",
+    output_dir=f"new_torgo4",
     per_device_train_batch_size=bs,
     gradient_accumulation_steps=1,
     learning_rate=1e-4,
     warmup_steps=2500,
-    num_train_epochs=20,
-    # max_steps=15000,
+    num_train_epochs=10,
+    # max_steps=200,
     gradient_checkpointing=True,
     dataloader_num_workers=4,
     per_device_eval_batch_size=bs,
@@ -396,10 +334,64 @@ training_args = Seq2SeqTrainingArguments(
     batch_eval_metrics=False,
     eval_strategy="steps",
     save_strategy="steps",
+    eval_on_start=False,
     # train_sampling_strategy="sequential"
 )
 
-trainer = Seq2SeqTrainer(
+class CustomTrainer(Seq2SeqTrainer):
+    def _get_dataloader(
+        self,
+        dataset: Dataset,
+        description: str,
+        batch_size: int,
+        sampler_fn,
+        is_training: bool = False,
+        dataloader_key: str | None = None,
+    ) -> torch.utils.data.DataLoader:
+        """Create a [`~torch.utils.data.DataLoader`] from the given dataset."""
+
+        data_collator = self.data_collator
+        data_collator.set_training(is_training)
+        dataset = self._remove_unused_columns(dataset, description=description)
+        # if is_datasets_available() and isinstance(dataset, datasets.Dataset):
+        #     dataset = self._remove_unused_columns(dataset, description=description)
+        # else:
+        #     data_collator = self._get_collator_with_removed_columns(self.data_collator, description=description)
+
+        # MPS requrires forking if multiple workers are specified
+        should_fork = torch.backends.mps.is_available() and self.args.dataloader_num_workers > 1
+
+        dataloader_params = {
+            "batch_size": batch_size,
+            "collate_fn": data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+            "multiprocessing_context": "fork" if should_fork else None,
+        }
+
+        if not isinstance(dataset, torch.utils.data.IterableDataset):
+            if sampler_fn is not None:
+                dataloader_params["sampler"] = sampler_fn(dataset)
+            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+            if is_training:
+                dataloader_params["worker_init_fn"] = functools.partial(
+                    seed_worker, num_workers=self.args.dataloader_num_workers, rank=self.args.process_index
+                )
+
+        dataloader = self.accelerator.prepare(torch.utils.data.DataLoader(dataset, **dataloader_params))
+
+        # Store the prepared dataloader for subsequent evaluations if using persistent workers.
+        if dataloader_key is not None and self.args.dataloader_persistent_workers:
+            if hasattr(self, "_eval_dataloaders"):
+                self._eval_dataloaders[dataloader_key] = dataloader
+            else:
+                self._eval_dataloaders = {dataloader_key: dataloader}
+
+        return dataloader
+
+trainer = CustomTrainer(
     args=training_args,
     model=model,
     train_dataset=train,
@@ -414,17 +406,3 @@ trainer = Seq2SeqTrainer(
 )
 
 trainer.train()
-
-# from transformers import Trainer
-
-# trainer = Trainer(
-#     model=model,
-#     data_collator=data_collator,
-#     args=training_args,
-#     compute_metrics=compute_metrics,
-#     train_dataset=train,
-#     eval_dataset=val,
-# )
-
-# %%
-# trainer.train()
